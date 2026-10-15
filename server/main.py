@@ -134,7 +134,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://pet-snap-ai.vercel.app",
+        "http://localhost:5173",           # Local Vite development
+        "http://127.0.0.1:5173",
+        "*",                               # Fallback
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
