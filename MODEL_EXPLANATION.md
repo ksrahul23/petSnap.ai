@@ -1,4 +1,4 @@
-# 🧠 Model Explanation & Architecture — petsnap.ai
+#  Model Explanation & Architecture — petsnap.ai
 
 This document provides a comprehensive technical breakdown of the deep learning classification model powering **petsnap.ai**, including data flow, layer specifications, and the confidence guardrail mechanism.
 

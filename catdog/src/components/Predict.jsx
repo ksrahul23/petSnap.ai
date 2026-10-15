@@ -44,61 +44,54 @@ const Predict = () => {
             setLoading(true);
             setErrorMessage("");
 
+            // Append selected image to FormData under the key 'file'
             const formData = new FormData();
             formData.append("file", file);
 
-            // Try local server first if available, then fallback to remote render API
-            const primaryUrl = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/predict";
-            const fallbackUrl = "https://catanddogclassification-1.onrender.com/predict";
+            // Dynamically construct backend URL using VITE_API_URL
+            const apiUrl = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/+$/, "");
+            const endpoint = `${apiUrl}/predict`;
 
-            let response;
-            try {
-                response = await fetch(primaryUrl, {
-                    method: "POST",
-                    body: formData,
-                });
-            } catch (localErr) {
-                // If local server is not running and primary was local, try fallback
-                if (primaryUrl !== fallbackUrl) {
-                    response = await fetch(fallbackUrl, {
-                        method: "POST",
-                        body: formData,
-                    });
-                } else {
-                    throw localErr;
-                }
-            }
+            const response = await fetch(endpoint, {
+                method: "POST",
+                body: formData,
+            });
 
             if (!response.ok) {
-                throw new Error(`Server returned ${response.status}`);
+                let errorDetail = `Server error (${response.status})`;
+                try {
+                    const errData = await response.json();
+                    if (errData.detail) errorDetail = errData.detail;
+                } catch {
+                    // Ignore JSON parsing errors for error status
+                }
+                throw new Error(errorDetail);
             }
 
             const data = await response.json();
 
-            if (data.error) {
-                setErrorMessage(data.error);
-                return;
-            }
+            // Extract class and confidence from the backend JSON response
+            const predictedClass = data.class || data.prediction || "Unknown";
+            const rawConfidence = data.confidence !== undefined 
+                ? (typeof data.confidence === "number" ? data.confidence : parseFloat(data.confidence)) 
+                : ((data.probability || 0) * 100);
 
-            // Confidence threshold check (Requirement 5)
-            // If the model's highest probability score falls below 60%,
-            // display "Not a dog/cat" instead of defaulting to nearest class.
-            const CONFIDENCE_THRESHOLD = 0.60;
-            const confidence = data.probability ?? Math.max(data.cat_probability || 0, data.dog_probability || 0);
-
-            let finalPrediction = data.prediction;
-            if (confidence < CONFIDENCE_THRESHOLD || data.prediction === "Not a dog/cat") {
-                finalPrediction = "Not a dog/cat";
-            }
+            // Compute decimal probability for Card visualization (0.0 to 1.0)
+            const probDecimal = rawConfidence > 1 ? rawConfidence / 100 : rawConfidence;
+            const confidencePercent = rawConfidence <= 1 ? (rawConfidence * 100) : rawConfidence;
 
             setPrediction({
                 ...data,
-                prediction: finalPrediction,
-                probability: confidence
+                class: predictedClass,
+                prediction: predictedClass,
+                confidence: confidencePercent,
+                probability: probDecimal,
+                cat_probability: data.cat_probability ?? (predictedClass === "Cat" ? probDecimal : 1 - probDecimal),
+                dog_probability: data.dog_probability ?? (predictedClass === "Dog" ? probDecimal : 1 - probDecimal),
             });
         } catch (err) {
-            console.error(err);
-            setErrorMessage("Prediction failed. Please ensure the backend is running or check internet connectivity.");
+            console.error("Network or prediction error:", err);
+            setErrorMessage(err.message || "Network error. Please make sure the backend is running at VITE_API_URL.");
         } finally {
             setLoading(false);
         }
