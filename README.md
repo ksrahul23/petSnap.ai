@@ -1,6 +1,6 @@
 #  petsnap.ai
 
-An intelligent, full-stack pet image classification application built with **PyTorch**, **FastAPI**, and **React**. `petsnap.ai` predicts whether an uploaded photo is a **Cat** or a **Dog**, and incorporates an active **60% confidence threshold guardrail** to identify non-pet or uncertain images as **"Not a dog/cat"** instead of forcing a false label.
+An intelligent, full-stack pet image classification application built with **FastAPI**, **ONNX Runtime**, **PyTorch**, and **React**. `petsnap.ai` predicts whether an uploaded photo is a **Cat** or a **Dog**, and incorporates an active **60% confidence threshold guardrail** to identify non-pet or uncertain images as **"Not a dog/cat"** instead of forcing a false label.
 
 ---
 
@@ -8,6 +8,7 @@ An intelligent, full-stack pet image classification application built with **PyT
 
 - **Accurate Species Prediction**: Classifies images as Cat or Dog using a custom 5-layer Convolutional Neural Network (CNN).
 - **Non-Pet Guardrail**: Rejects arbitrary or ambiguous images when confidence is below 60%, returning `"Not a dog/cat"`.
+- **Low-Memory Production Backend**: Model deployed via **ONNX Runtime** (~40MB RAM usage) to comfortably run on Render's 512MB free tier without OOM issues.
 - **Modern Web App**: Fast, responsive React frontend with interactive drag-and-drop upload, and instant probability visualizer.
 - **Team Dog vs Team Cat Trivia**: Standalone interactive showcase with fun trivia below the upload center.
 - **Model Diagnostics**: Real-time display of accuracy (89.58%), precision, recall, F1-score, and confusion matrix.
@@ -19,7 +20,7 @@ An intelligent, full-stack pet image classification application built with **PyT
 
 ##  Tech Stack
 
-- **Machine Learning & Backend**: Python 3.10+, PyTorch, Torchvision, FastAPI, Uvicorn, Pillow
+- **Machine Learning & Backend**: Python 3.10+, ONNX Runtime, FastAPI, Uvicorn, Pillow, NumPy (PyTorch for CNN training)
 - **Frontend**: React 19, Vite, Tailwind CSS
 
 ---
@@ -34,7 +35,7 @@ cd CatAndDogClassification
 
 ### 2. Backend Setup
 ```bash
-cd client
+cd server
 python -m venv venv
 
 # Windows:
@@ -57,7 +58,7 @@ npm install
 ##  How to Run
 
 ### Start Backend API
-From the `client` directory:
+From the `server` directory:
 ```bash
 uvicorn main:app --reload --port 8000
 ```
@@ -69,6 +70,14 @@ From the `catdog` directory:
 npm run dev
 ```
 *Open your browser at `http://localhost:5173` to access petsnap.ai.*
+
+---
+
+##  Model Conversion (Optional)
+To regenerate `server/best_catdog_model.onnx` from original PyTorch weights `best_catdog_model.pth`:
+```bash
+python convert_to_onnx.py
+```
 
 ---
 

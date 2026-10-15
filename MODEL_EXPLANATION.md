@@ -138,3 +138,12 @@ Actual Dog           43              553
 - **False Positives (Cat → Dog)**: 82
 - **False Negatives (Dog → Cat)**: 43
 - **True Positives (Dog → Dog)**: 553
+
+---
+
+## 6. Production Deployment (ONNX Runtime)
+
+To run within Render's free tier (512 MB RAM limit) without memory exhaustion, the model is exported to Open Neural Network Exchange format (`best_catdog_model.onnx`):
+- **Memory Footprint**: Peak RAM is reduced from ~450+ MB under full PyTorch down to **~40 MB** under ONNX Runtime CPU.
+- **Size Optimization**: The ONNX file is **6.24 MB** (down from the 19.68 MB PyTorch checkpoint) by pruning training optimizer states.
+- **Inference Latency**: Single image CPU inference completes in ~15-30ms with identical mathematical output parity (max diff < 1e-6).

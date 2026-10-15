@@ -4,131 +4,107 @@ import gc
 import asyncio
 from typing import Dict, Any
 
+import numpy as np
+from PIL import Image, UnidentifiedImageError
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image, UnidentifiedImageError
-
-import torch
-from torch import nn
-from torchvision import transforms
+import onnxruntime
 import uvicorn
 
 
 # ==============================================================================
-# Configuration & Device
+# Configuration & Constants
 # ==============================================================================
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_FILENAME = "best_catdog_model.pth"
+MODEL_FILENAME = "best_catdog_model.onnx"
 
-# Check server directory first, fallback to client directory if needed
-MODEL_PATH = os.path.join(BASE_DIR, MODEL_FILENAME)
+# Locate ONNX model in server folder or current working directory
+MODEL_PATH = MODEL_FILENAME
 if not os.path.exists(MODEL_PATH):
-    fallback_path = os.path.join(BASE_DIR, "..", "client", MODEL_FILENAME)
-    if os.path.exists(fallback_path):
-        MODEL_PATH = fallback_path
+    candidate_path = os.path.join(BASE_DIR, MODEL_FILENAME)
+    if os.path.exists(candidate_path):
+        MODEL_PATH = candidate_path
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB limit
 CONFIDENCE_THRESHOLD = 0.60       # 60% confidence guardrail
 CLASSES = ["Cat", "Dog"]
+
+# Standard ImageNet normalization parameters
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 # Semaphore to prevent RAM/CPU exhaustion under concurrent requests
 inference_semaphore = asyncio.Semaphore(4)
 
 
 # ==============================================================================
-# PyTorch Model Architecture (Matches best_catdog_model.pth)
+# Model Loading (ONNX Runtime)
 # ==============================================================================
-class CatDogCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(128, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(256, 512, 3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.AdaptiveAvgPool2d(1)
-        )
-
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Dropout(0.5),
-            nn.Linear(512, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 2)
-        )
-
-    def forward(self, x):
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
-
-
-# ==============================================================================
-# Model Initialization & Checkpoint Loading
-# ==============================================================================
-model = CatDogCNN().to(device)
-
-if os.path.exists(MODEL_PATH):
-    print(f"Loading weights from {MODEL_PATH} on {device}...")
-    checkpoint = torch.load(MODEL_PATH, map_location=device)
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint)
-    model.eval()
-    for param in model.parameters():
-        param.requires_grad_(False)
-    del checkpoint
-    gc.collect()
-    print("Model loaded successfully.")
-else:
-    print(f"WARNING: Model file not found at {MODEL_PATH}. Prediction endpoint will return 503 until model is present.")
-
-
-# ==============================================================================
-# Image Preprocessing Transform
-# ==============================================================================
-# Resize to 224x224, convert to Tensor, and apply standard ImageNet normalization
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
+print(f"Loading ONNX model from {MODEL_PATH}...")
+try:
+    session = onnxruntime.InferenceSession(
+        MODEL_PATH,
+        providers=["CPUExecutionProvider"]
     )
-])
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+    print(f"Model successfully loaded. Input: '{input_name}', Output: '{output_name}'")
+except Exception as e:
+    session = None
+    input_name = None
+    output_name = None
+    print(f"WARNING: Failed to initialize ONNX session with {MODEL_PATH}: {e}")
 
 
 # ==============================================================================
-# FastAPI App & Robust CORS Setup
+# Preprocessing & Math Helpers
+# ==============================================================================
+def preprocess_image(image: Image.Image) -> np.ndarray:
+    """
+    Preprocess PIL Image using NumPy:
+    - Convert to RGB
+    - Resize to 224x224 (Bilinear)
+    - Scale pixel values to [0.0, 1.0]
+    - Apply ImageNet mean and std normalization
+    - Transpose from (H, W, C) to (C, H, W)
+    - Add batch dimension -> shape (1, C, H, W)
+    - Ensure float32 dtype
+    """
+    # 1. Convert to RGB
+    image = image.convert("RGB")
+
+    # 2. Resize to 224x224
+    image = image.resize((224, 224), Image.Resampling.BILINEAR)
+
+    # 3. Convert to float32 NumPy array and scale to [0, 1]
+    img_array = np.array(image, dtype=np.float32) / 255.0
+
+    # 4. Standard ImageNet normalization: (x - mean) / std
+    img_array = (img_array - IMAGENET_MEAN) / IMAGENET_STD
+
+    # 5. Transpose from (H, W, C) to (C, H, W)
+    img_array = img_array.transpose(2, 0, 1)
+
+    # 6. Add batch dimension -> (1, 3, 224, 224)
+    img_array = np.expand_dims(img_array, axis=0)
+
+    return img_array.astype(np.float32)
+
+
+def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    """
+    Numerically stable Softmax function using NumPy.
+    """
+    e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
+    return e_x / np.sum(e_x, axis=axis, keepdims=True)
+
+
+# ==============================================================================
+# FastAPI App & CORS Setup
 # ==============================================================================
 app = FastAPI(
     title="petSnap.ai Image Classification API",
-    description="FastAPI service serving PyTorch Cat vs Dog CNN classifier",
+    description="FastAPI service serving ONNX Runtime Cat vs Dog CNN classifier",
     version="1.0.0"
 )
 
@@ -154,7 +130,7 @@ def root() -> Dict[str, str]:
     return {
         "status": "online",
         "service": "petSnap.ai Classification API",
-        "device": str(device)
+        "runtime": "ONNX Runtime (CPU)"
     }
 
 
@@ -162,21 +138,21 @@ def root() -> Dict[str, str]:
 def health() -> Dict[str, Any]:
     return {
         "status": "healthy",
-        "device": str(device),
-        "model_loaded": os.path.exists(MODEL_PATH)
+        "runtime": "ONNX Runtime (CPU)",
+        "model_loaded": session is not None
     }
 
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)) -> Dict[str, Any]:
     """
-    Accepts an uploaded image file, processes it, and returns the predicted class
-    ('Cat' or 'Dog') with confidence score as a percentage.
+    Accepts an uploaded image file, preprocesses it, runs ONNX inference,
+    computes probabilities via Softmax, and returns classification results.
     """
-    if not os.path.exists(MODEL_PATH):
+    if session is None:
         raise HTTPException(
             status_code=503,
-            detail=f"Model file not found on server ({MODEL_FILENAME})."
+            detail=f"Model file not loaded on server ({MODEL_FILENAME})."
         )
 
     # 1. Validate file extension / MIME type if provided
@@ -203,7 +179,6 @@ async def predict(file: UploadFile = File(...)) -> Dict[str, Any]:
     try:
         image = Image.open(io.BytesIO(contents))
         image.load()
-        image = image.convert("RGB")
     except (UnidentifiedImageError, OSError):
         raise HTTPException(status_code=400, detail="Invalid or corrupted image file.")
     finally:
@@ -212,20 +187,21 @@ async def predict(file: UploadFile = File(...)) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 4. Transform image and run inference
+    # 4. Preprocess image and execute ONNX inference
+    input_tensor = None
     try:
-        tensor = transform(image).unsqueeze(0).to(device)
+        input_tensor = preprocess_image(image)
 
         async with inference_semaphore:
-            with torch.inference_mode():
-                logits = model(tensor)
-                probs = torch.softmax(logits, dim=1)[0]
+            outputs = session.run([output_name], {input_name: input_tensor})
+            logits = outputs[0][0]  # shape (2,)
+            probs = softmax(logits)
 
-                cat_prob = probs[0].item()
-                dog_prob = probs[1].item()
+            cat_prob = float(probs[0])
+            dog_prob = float(probs[1])
 
         # 5. Extract prediction and confidence percentage
-        pred_idx = torch.argmax(probs).item()
+        pred_idx = int(np.argmax(probs))
         raw_prediction = CLASSES[pred_idx]
         max_prob = max(cat_prob, dog_prob)
         confidence_pct = round(max_prob * 100.0, 2)
@@ -254,9 +230,13 @@ async def predict(file: UploadFile = File(...)) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
     finally:
-        # Free tensor memory
-        del tensor
-        del image
+        # Safe memory cleanup
+        if input_tensor is not None:
+            del input_tensor
+        if "image" in locals() and image is not None:
+            del image
+        if "contents" in locals() and contents is not None:
+            del contents
         gc.collect()
 
 
